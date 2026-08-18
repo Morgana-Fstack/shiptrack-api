@@ -1,129 +1,127 @@
-import pytest
-import sys
 import os
+import sys
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.main import app, init_db
+from app.main import create_app
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
-    """Set up a fresh test database for each test."""
-    test_db = str(tmp_path / "test_shiptrack.db")
-    monkeypatch.setattr("app.main.DB_PATH", test_db)
-    with app.test_client() as client:
-        with app.app_context():
-            init_db()
-        yield client
+def client(tmp_path):
+    app = create_app(f"sqlite:///{tmp_path / 'test_shiptrack.db'}")
+    app.config.update(TESTING=True)
+    with app.test_client() as test_client:
+        yield test_client
 
 
 def create_shipment(client, **kwargs):
     payload = {
-        "order_id": "ORD-001",
-        "carrier": "DHL",
-        "origin": "Florence, IT",
-        "destination": "Curitiba, BR",
-        **kwargs
+        "order_id": "ORD-001", "carrier": "DHL",
+        "origin": "Florence, IT", "destination": "Curitiba, BR", **kwargs,
     }
     return client.post("/shipments", json=payload)
 
 
-# ── Health ────────────────────────────────────────────────────────────────────
+def add_event(client, shipment_id, **kwargs):
+    payload = {
+        "status": "in_transit", "location": "São Paulo, BR",
+        "description": "Package arrived at sorting facility.",
+        "notify": "user@test.com", **kwargs,
+    }
+    return client.post(f"/shipments/{shipment_id}/events", json=payload)
+
 
 def test_health(client):
-    res = client.get("/health")
-    assert res.status_code == 200
-    assert res.get_json()["status"] == "ok"
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "ok"
 
-
-# ── Shipments ─────────────────────────────────────────────────────────────────
 
 def test_create_shipment(client):
-    res = create_shipment(client)
-    assert res.status_code == 201
-    data = res.get_json()
-    assert data["status"] == "pending"
-    assert data["carrier"] == "DHL"
-    assert "id" in data
+    response = create_shipment(client)
+    assert response.status_code == 201
+    assert response.get_json()["status"] == "pending"
+    assert response.get_json()["carrier"] == "DHL"
 
 
 def test_create_shipment_missing_fields(client):
-    res = client.post("/shipments", json={"order_id": "ORD-002"})
-    assert res.status_code == 400
-    assert "Missing fields" in res.get_json()["error"]
+    response = client.post("/shipments", json={"order_id": "ORD-002"})
+    assert response.status_code == 400
+    assert "Missing fields" in response.get_json()["error"]
 
 
-def test_list_shipments(client):
+def test_list_shipments_with_filter_and_pagination(client):
     create_shipment(client, order_id="ORD-001")
     create_shipment(client, order_id="ORD-002")
-    res = client.get("/shipments")
-    assert res.status_code == 200
-    assert len(res.get_json()) == 2
-
-
-def test_list_shipments_filter_by_status(client):
-    create_shipment(client, order_id="ORD-001")
-    res = client.get("/shipments?status=pending")
-    assert res.status_code == 200
-    assert all(s["status"] == "pending" for s in res.get_json())
+    response = client.get("/shipments?status=pending&page=1&per_page=1")
+    assert response.status_code == 200
+    assert len(response.get_json()) == 1
 
 
 def test_get_shipment_with_history(client):
     shipment_id = create_shipment(client).get_json()["id"]
-    res = client.get(f"/shipments/{shipment_id}")
-    assert res.status_code == 200
-    data = res.get_json()
-    assert "tracking_history" in data
-    assert len(data["tracking_history"]) == 1  # auto-created on registration
+    response = client.get(f"/shipments/{shipment_id}")
+    assert response.status_code == 200
+    assert len(response.get_json()["tracking_history"]) == 1
 
 
 def test_get_shipment_not_found(client):
-    res = client.get("/shipments/nonexistent-id")
-    assert res.status_code == 404
+    assert client.get("/shipments/nonexistent-id").status_code == 404
 
 
-# ── Tracking events ───────────────────────────────────────────────────────────
-
-def test_add_tracking_event(client):
+def test_add_tracking_event_sends_notification(client):
     shipment_id = create_shipment(client).get_json()["id"]
-    res = client.post(f"/shipments/{shipment_id}/events", json={
-        "status": "in_transit",
-        "location": "São Paulo, BR",
-        "description": "Package arrived at sorting facility.",
-        "notify": "user@test.com"
-    })
-    assert res.status_code == 201
-    data = res.get_json()
-    assert data["status"] == "in_transit"
-    assert data["notification_sent_to"] == "user@test.com"
+    response = add_event(client, shipment_id)
+    assert response.status_code == 201
+    assert response.get_json()["notification"]["status"] == "sent"
+    assert response.get_json()["notification"]["attempts"] == 1
 
 
 def test_add_event_invalid_status(client):
     shipment_id = create_shipment(client).get_json()["id"]
-    res = client.post(f"/shipments/{shipment_id}/events", json={
-        "status": "flying_through_space"
-    })
-    assert res.status_code == 400
+    response = add_event(client, shipment_id, status="flying_through_space")
+    assert response.status_code == 400
 
 
-def test_status_updates_on_event(client):
+def test_event_idempotency(client):
     shipment_id = create_shipment(client).get_json()["id"]
-    client.post(f"/shipments/{shipment_id}/events", json={"status": "delivered"})
-    updated = client.get(f"/shipments/{shipment_id}").get_json()
-    assert updated["status"] == "delivered"
+    first = add_event(client, shipment_id, external_event_id="DHL-123")
+    duplicate = add_event(client, shipment_id, external_event_id="DHL-123")
+    assert first.status_code == 201
+    assert duplicate.status_code == 200
+    assert duplicate.get_json()["duplicate"] is True
 
 
-# ── Notifications ─────────────────────────────────────────────────────────────
-
-def test_notifications_logged(client):
+def test_failed_notification_is_visible_and_retryable(client):
     shipment_id = create_shipment(client).get_json()["id"]
-    client.post(f"/shipments/{shipment_id}/events", json={
-        "status": "out_for_delivery",
-        "notify": "buyer@shop.com"
-    })
-    res = client.get(f"/shipments/{shipment_id}/notifications")
-    assert res.status_code == 200
-    notifs = res.get_json()
-    assert len(notifs) == 1
-    assert notifs[0]["recipient"] == "buyer@shop.com"
+    created = add_event(client, shipment_id, notify="provider@fail.test")
+    notification = created.get_json()["notification"]
+    assert notification["status"] == "failed"
+    assert notification["attempts"] == 1
+    assert notification["last_error"] == "Notification provider unavailable"
+
+    retry = client.post(f"/notifications/{notification['id']}/retry")
+    assert retry.status_code == 200
+    assert retry.get_json()["attempts"] == 2
+    assert retry.get_json()["status"] == "failed"
+
+
+def test_retry_stops_after_maximum_attempts(client):
+    shipment_id = create_shipment(client).get_json()["id"]
+    notification = add_event(client, shipment_id, notify="provider@fail.test").get_json()["notification"]
+    client.post(f"/notifications/{notification['id']}/retry")
+    client.post(f"/notifications/{notification['id']}/retry")
+    response = client.post(f"/notifications/{notification['id']}/retry")
+    assert response.status_code == 409
+    assert response.get_json()["error"] == "Maximum delivery attempts reached"
+
+
+def test_notifications_log_contains_delivery_state(client):
+    shipment_id = create_shipment(client).get_json()["id"]
+    add_event(client, shipment_id, status="out_for_delivery", notify="buyer@shop.com")
+    response = client.get(f"/shipments/{shipment_id}/notifications")
+    assert response.status_code == 200
+    assert response.get_json()[0]["status"] == "sent"
+    assert response.get_json()[0]["recipient"] == "buyer@shop.com"

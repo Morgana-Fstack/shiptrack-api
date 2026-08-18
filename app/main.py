@@ -1,234 +1,154 @@
-from flask import Flask, jsonify, request
-from datetime import datetime, timezone
-import sqlite3
-import uuid
+import logging
 import os
 
-app = Flask(__name__)
-DB_PATH = os.path.join(os.path.dirname(__file__), "shiptrack.db")
+from flask import Flask, jsonify, request
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+
+from app.database import configure_database, get_session, init_db
+from app.models import Notification, Shipment, TrackingEvent, iso, utc_now
+from app.notifications import NotificationDeliveryError, attempt_delivery
 
 
-# ── Database setup ────────────────────────────────────────────────────────────
-
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+VALID_STATUSES = {"pending", "picked_up", "in_transit", "out_for_delivery", "delivered", "failed"}
 
 
-def init_db():
-    conn = get_db()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS shipments (
-            id          TEXT PRIMARY KEY,
-            order_id    TEXT NOT NULL,
-            carrier     TEXT NOT NULL,
-            status      TEXT NOT NULL DEFAULT 'pending',
-            origin      TEXT NOT NULL,
-            destination TEXT NOT NULL,
-            created_at  TEXT NOT NULL,
-            updated_at  TEXT NOT NULL
-        );
+def create_app(database_url=None):
+    application = Flask(__name__)
+    configure_database(database_url)
+    init_db()
 
-        CREATE TABLE IF NOT EXISTS tracking_events (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            shipment_id TEXT NOT NULL,
-            status      TEXT NOT NULL,
-            location    TEXT,
-            description TEXT,
-            timestamp   TEXT NOT NULL,
-            FOREIGN KEY (shipment_id) REFERENCES shipments(id)
-        );
+    @application.post("/shipments")
+    def create_shipment():
+        data = request.get_json(silent=True) or {}
+        required = ["order_id", "carrier", "origin", "destination"]
+        missing = [field for field in required if not data.get(field)]
+        if missing:
+            return jsonify({"error": f"Missing fields: {', '.join(missing)}"}), 400
 
-        CREATE TABLE IF NOT EXISTS notifications (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            shipment_id TEXT NOT NULL,
-            event_id    INTEGER NOT NULL,
-            channel     TEXT NOT NULL,
-            recipient   TEXT NOT NULL,
-            sent_at     TEXT NOT NULL,
-            FOREIGN KEY (shipment_id) REFERENCES shipments(id),
-            FOREIGN KEY (event_id)    REFERENCES tracking_events(id)
-        );
-    """)
-    conn.commit()
-    conn.close()
+        with get_session() as session:
+            shipment = Shipment(
+                order_id=data["order_id"], carrier=data["carrier"],
+                origin=data["origin"], destination=data["destination"]
+            )
+            shipment.events.append(TrackingEvent(
+                status="pending", location=data["origin"],
+                description="Shipment registered in the system."
+            ))
+            session.add(shipment)
+            session.commit()
+            return jsonify(shipment.as_dict()), 201
 
+    @application.get("/shipments")
+    def list_shipments():
+        status_filter = request.args.get("status")
+        page = max(request.args.get("page", 1, type=int), 1)
+        per_page = min(max(request.args.get("per_page", 50, type=int), 1), 100)
+        statement = select(Shipment).order_by(Shipment.created_at.desc())
+        if status_filter:
+            statement = statement.where(Shipment.status == status_filter)
+        statement = statement.offset((page - 1) * per_page).limit(per_page)
+        with get_session() as session:
+            shipments = session.scalars(statement).all()
+            return jsonify([shipment.as_dict() for shipment in shipments])
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+    @application.get("/shipments/<shipment_id>")
+    def get_shipment(shipment_id):
+        with get_session() as session:
+            shipment = session.get(Shipment, shipment_id)
+            if not shipment:
+                return jsonify({"error": "Shipment not found"}), 404
+            return jsonify(shipment.as_dict(include_history=True))
 
-VALID_STATUSES = ["pending", "picked_up", "in_transit", "out_for_delivery", "delivered", "failed"]
+    @application.post("/shipments/<shipment_id>/events")
+    def add_event(shipment_id):
+        data = request.get_json(silent=True) or {}
+        status = data.get("status")
+        if status not in VALID_STATUSES:
+            return jsonify({"error": f"Invalid status. Valid options: {sorted(VALID_STATUSES)}"}), 400
 
-def now():
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        with get_session() as session:
+            shipment = session.get(Shipment, shipment_id)
+            if not shipment:
+                return jsonify({"error": "Shipment not found"}), 404
 
-def row_to_dict(row):
-    return dict(row) if row else None
+            external_event_id = data.get("external_event_id")
+            if external_event_id:
+                existing = session.scalar(select(TrackingEvent).where(
+                    TrackingEvent.shipment_id == shipment_id,
+                    TrackingEvent.external_event_id == external_event_id,
+                ))
+                if existing:
+                    response = existing.as_dict()
+                    response["duplicate"] = True
+                    return jsonify(response), 200
 
+            event = TrackingEvent(
+                shipment_id=shipment_id, external_event_id=external_event_id,
+                status=status, location=data.get("location"), description=data.get("description")
+            )
+            shipment.status = status
+            shipment.updated_at = utc_now()
+            session.add(event)
+            try:
+                session.flush()
+            except IntegrityError:
+                session.rollback()
+                return jsonify({"error": "Duplicate tracking event"}), 409
 
-# ── Routes: Shipments ─────────────────────────────────────────────────────────
+            notification = Notification(
+                shipment_id=shipment_id, event_id=event.id,
+                channel=data.get("channel", "email"),
+                recipient=data.get("notify", "customer@example.com"),
+            )
+            session.add(notification)
+            session.flush()
+            attempt_delivery(notification)
+            session.commit()
 
-@app.route("/shipments", methods=["POST"])
-def create_shipment():
-    """Create a new shipment."""
-    data = request.get_json(silent=True) or {}
-    required = ["order_id", "carrier", "origin", "destination"]
-    missing = [f for f in required if not data.get(f)]
-    if missing:
-        return jsonify({"error": f"Missing fields: {', '.join(missing)}"}), 400
+            return jsonify({
+                **event.as_dict(), "notification": notification.as_dict(),
+                "notification_sent_to": notification.recipient,
+            }), 201
 
-    shipment_id = str(uuid.uuid4())
-    ts = now()
+    @application.get("/shipments/<shipment_id>/notifications")
+    def get_notifications(shipment_id):
+        with get_session() as session:
+            rows = session.scalars(
+                select(Notification)
+                .where(Notification.shipment_id == shipment_id)
+                .order_by(Notification.created_at.asc())
+            ).all()
+            return jsonify([notification.as_dict() for notification in rows])
 
-    conn = get_db()
-    conn.execute(
-        """INSERT INTO shipments (id, order_id, carrier, status, origin, destination, created_at, updated_at)
-           VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)""",
-        (shipment_id, data["order_id"], data["carrier"], data["origin"], data["destination"], ts, ts)
-    )
-    # Auto-create the first tracking event
-    cursor = conn.execute(
-        """INSERT INTO tracking_events (shipment_id, status, location, description, timestamp)
-           VALUES (?, 'pending', ?, 'Shipment registered in the system.', ?)""",
-        (shipment_id, data["origin"], ts)
-    )
-    conn.commit()
-    conn.close()
+    @application.post("/notifications/<int:notification_id>/retry")
+    def retry_notification(notification_id):
+        with get_session() as session:
+            notification = session.get(Notification, notification_id)
+            if not notification:
+                return jsonify({"error": "Notification not found"}), 404
+            try:
+                attempt_delivery(notification)
+            except NotificationDeliveryError as error:
+                return jsonify({"error": str(error), **notification.as_dict()}), 409
+            session.commit()
+            return jsonify(notification.as_dict()), 200
 
-    return jsonify({
-        "id": shipment_id,
-        "order_id": data["order_id"],
-        "carrier": data["carrier"],
-        "status": "pending",
-        "origin": data["origin"],
-        "destination": data["destination"],
-        "created_at": ts
-    }), 201
+    @application.get("/health")
+    def health():
+        try:
+            with get_session() as session:
+                session.execute(select(1))
+            return jsonify({"status": "ok", "timestamp": iso(utc_now())})
+        except Exception:
+            logging.exception("Database health check failed")
+            return jsonify({"status": "unhealthy"}), 503
 
-
-@app.route("/shipments", methods=["GET"])
-def list_shipments():
-    """List all shipments, optionally filtered by status."""
-    status_filter = request.args.get("status")
-    conn = get_db()
-    if status_filter:
-        rows = conn.execute(
-            "SELECT * FROM shipments WHERE status = ? ORDER BY created_at DESC", (status_filter,)
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM shipments ORDER BY created_at DESC"
-        ).fetchall()
-    conn.close()
-    return jsonify([row_to_dict(r) for r in rows])
-
-
-@app.route("/shipments/<shipment_id>", methods=["GET"])
-def get_shipment(shipment_id):
-    """Get a shipment and its full tracking history."""
-    conn = get_db()
-    shipment = conn.execute(
-        "SELECT * FROM shipments WHERE id = ?", (shipment_id,)
-    ).fetchone()
-    if not shipment:
-        conn.close()
-        return jsonify({"error": "Shipment not found"}), 404
-
-    events = conn.execute(
-        "SELECT * FROM tracking_events WHERE shipment_id = ? ORDER BY timestamp ASC",
-        (shipment_id,)
-    ).fetchall()
-    conn.close()
-
-    result = row_to_dict(shipment)
-    result["tracking_history"] = [row_to_dict(e) for e in events]
-    return jsonify(result)
-
-
-# ── Routes: Tracking events ───────────────────────────────────────────────────
-
-@app.route("/shipments/<shipment_id>/events", methods=["POST"])
-def add_event(shipment_id):
-    """Push a new tracking event and trigger a notification."""
-    conn = get_db()
-    shipment = conn.execute(
-        "SELECT * FROM shipments WHERE id = ?", (shipment_id,)
-    ).fetchone()
-    if not shipment:
-        conn.close()
-        return jsonify({"error": "Shipment not found"}), 404
-
-    data = request.get_json(silent=True) or {}
-    status = data.get("status")
-    if status not in VALID_STATUSES:
-        conn.close()
-        return jsonify({"error": f"Invalid status. Valid options: {VALID_STATUSES}"}), 400
-
-    ts = now()
-
-    # Insert tracking event
-    cursor = conn.execute(
-        """INSERT INTO tracking_events (shipment_id, status, location, description, timestamp)
-           VALUES (?, ?, ?, ?, ?)""",
-        (shipment_id, status, data.get("location"), data.get("description"), ts)
-    )
-    event_id = cursor.lastrowid
-
-    # Update shipment status
-    conn.execute(
-        "UPDATE shipments SET status = ?, updated_at = ? WHERE id = ?",
-        (status, ts, shipment_id)
-    )
-
-    # Simulate notification dispatch
-    recipient = data.get("notify", "customer@example.com")
-    conn.execute(
-        """INSERT INTO notifications (shipment_id, event_id, channel, recipient, sent_at)
-           VALUES (?, ?, 'email', ?, ?)""",
-        (shipment_id, event_id, recipient, ts)
-    )
-
-    conn.commit()
-    conn.close()
-
-    return jsonify({
-        "event_id": event_id,
-        "shipment_id": shipment_id,
-        "status": status,
-        "location": data.get("location"),
-        "description": data.get("description"),
-        "timestamp": ts,
-        "notification_sent_to": recipient
-    }), 201
+    return application
 
 
-# ── Routes: Notifications ─────────────────────────────────────────────────────
+app = create_app()
 
-@app.route("/shipments/<shipment_id>/notifications", methods=["GET"])
-def get_notifications(shipment_id):
-    """Get all notifications sent for a shipment."""
-    conn = get_db()
-    rows = conn.execute(
-        """SELECT n.*, e.status as event_status
-           FROM notifications n
-           JOIN tracking_events e ON n.event_id = e.id
-           WHERE n.shipment_id = ?
-           ORDER BY n.sent_at ASC""",
-        (shipment_id,)
-    ).fetchall()
-    conn.close()
-    return jsonify([row_to_dict(r) for r in rows])
-
-
-# ── Health check ──────────────────────────────────────────────────────────────
-
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok", "timestamp": now()})
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    init_db()
-    app.run(debug=True, port=5000)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("FLASK_DEBUG") == "1")
