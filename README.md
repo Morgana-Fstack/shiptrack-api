@@ -1,21 +1,25 @@
 # ShipTrack API 📦
 
+[English](#english) | [Português](#português)
+
+## English
+
 A production-minded REST API for shipment tracking and reliable customer notifications.
 
-The project models a real logistics problem: carrier events arrive repeatedly and sometimes out of order, while customers expect every relevant update to be delivered and failures to remain visible.
+The project models a real logistics challenge: carrier events may arrive repeatedly or out of order, while customers expect relevant updates to be delivered and failures to remain visible.
 
-## What it demonstrates
+### What it demonstrates
 
-- Python and Flask API design
-- PostgreSQL with SQLAlchemy 2.0
-- Auditable shipment event history
-- Idempotent carrier events
-- Notification delivery states, errors and bounded retries
-- Pagination and filtering
-- Dockerized local environment
-- Automated tests and Docker builds with GitHub Actions
+- Python and Flask API design;
+- PostgreSQL with SQLAlchemy 2.0;
+- auditable shipment event history;
+- idempotent carrier events;
+- notification states, error visibility and bounded retries;
+- pagination and filtering;
+- Dockerized local environment;
+- automated tests and Docker builds with GitHub Actions.
 
-## Architecture
+### Architecture
 
 ```mermaid
 flowchart LR
@@ -26,21 +30,17 @@ flowchart LR
     D -->|failure| F[Error + retry state]
 ```
 
-The notification adapter is deterministic in local development: it validates recipients and records delivery attempts without contacting a real provider. Its boundary can be replaced by Amazon SES, SNS or an HTTP webhook client.
+The local notification adapter validates recipients and records attempts without contacting a real provider. It can be replaced by Amazon SES, SNS or an HTTP webhook client. On AWS, the flow can evolve to API Gateway or ECS, SQS, a notification worker, RDS/Aurora and a dead-letter queue.
 
-For a distributed AWS deployment, the same flow can evolve to API Gateway/ECS, SQS, a notification worker, RDS/Aurora and a dead-letter queue. The current database-backed retry model keeps that failure lifecycle explicit while remaining easy to run locally.
-
-## Tech stack
+### Tech stack
 
 - Python 3.11+
-- Flask
-- SQLAlchemy
-- PostgreSQL (SQLite is used by isolated tests and as a zero-setup fallback)
+- Flask and SQLAlchemy
+- PostgreSQL; SQLite for isolated tests and zero-setup local use
 - Docker and Docker Compose
-- pytest
-- GitHub Actions
+- pytest and GitHub Actions
 
-## Run with Docker
+### Run with Docker
 
 ```bash
 git clone https://github.com/Morgana-Fstack/shiptrack-api.git
@@ -48,9 +48,9 @@ cd shiptrack-api
 docker compose up --build
 ```
 
-The API starts at `http://localhost:5000`. Docker Compose also starts PostgreSQL and waits for its health check before starting the API.
+The API starts at `http://localhost:5000`.
 
-## Run without Docker
+### Run without Docker
 
 ```bash
 python -m venv .venv
@@ -59,103 +59,115 @@ pip install -r requirements.txt
 python -m app.main
 ```
 
-Without `DATABASE_URL`, the application uses a local SQLite database. To use PostgreSQL, copy `.env.example` and provide a SQLAlchemy connection URL.
+Without `DATABASE_URL`, the application uses a local SQLite database.
 
-## API reference
-
-### Health check
+### Main endpoints
 
 ```http
-GET /health
-```
-
-### Create a shipment
-
-```http
+GET  /health
 POST /shipments
-Content-Type: application/json
-
-{
-  "order_id": "ORD-2026-001",
-  "carrier": "DHL",
-  "origin": "Florence, IT",
-  "destination": "Curitiba, BR"
-}
-```
-
-### List and filter shipments
-
-```http
-GET /shipments
-GET /shipments?status=in_transit&page=1&per_page=20
-```
-
-`per_page` is capped at 100 to protect the service from unbounded list requests.
-
-### Get a shipment and its tracking history
-
-```http
-GET /shipments/{shipment_id}
-```
-
-### Add a carrier event
-
-```http
+GET  /shipments?status=in_transit&page=1&per_page=20
+GET  /shipments/{shipment_id}
 POST /shipments/{shipment_id}/events
-Content-Type: application/json
-
-{
-  "external_event_id": "DHL-EVENT-98421",
-  "status": "in_transit",
-  "location": "São Paulo, BR",
-  "description": "Package arrived at the sorting facility.",
-  "channel": "email",
-  "notify": "customer@example.com"
-}
-```
-
-`external_event_id` makes repeated carrier deliveries idempotent. Sending it again returns the original event with `duplicate: true` instead of creating another event or notification.
-
-Valid shipment states are `pending`, `picked_up`, `in_transit`, `out_for_delivery`, `delivered` and `failed`.
-
-### Inspect notification delivery
-
-```http
-GET /shipments/{shipment_id}/notifications
-```
-
-Each record exposes `status`, `attempts`, `last_error`, `created_at` and `sent_at`, so a delivery failure never disappears silently.
-
-### Retry a failed notification
-
-```http
+GET  /shipments/{shipment_id}/notifications
 POST /notifications/{notification_id}/retry
 ```
 
-Delivery is limited to three attempts. Further retries return `409 Conflict`, preventing an infinite retry loop.
+Carrier updates may include an `external_event_id`. Repeated delivery of the same identifier returns the existing event instead of creating duplicate state changes or customer notifications. Notification attempts are limited to three and failures remain available for investigation.
 
-## Tests and CI
+### Tests
 
 ```bash
 pytest -v
 ```
 
-The test suite covers shipment creation, validation, filtering, tracking history, idempotency, successful delivery, provider failure, visible error state and the maximum retry limit.
+The suite covers creation, validation, filtering, tracking history, idempotency, successful delivery, provider failure and maximum retry limits.
 
-GitHub Actions runs the suite on Python 3.11 and 3.12 and verifies that the Docker image builds for every pull request.
+---
 
-## Design decisions
+## Português
 
-**Why preserve tracking events separately?** Updating only the latest shipment status would destroy history. An append-only event timeline makes disputes and operational debugging auditable.
+API REST desenvolvida com uma abordagem próxima de produção para rastreamento de encomendas e notificações confiáveis aos clientes.
 
-**Why idempotency?** Carrier webhooks can be delivered more than once. A unique external event per shipment prevents duplicate state changes and duplicate customer messages.
+O projeto representa um desafio real de logística: eventos das transportadoras podem chegar repetidos ou fora de ordem, enquanto os clientes esperam receber atualizações relevantes e as falhas precisam permanecer visíveis.
 
-**Why store notification failures?** A successful tracking update does not guarantee a successful customer message. Delivery status and errors are separate operational concerns.
+### O que o projeto demonstra
 
-**Why bounded retries?** Transient failures deserve another attempt, but an unlimited loop amplifies outages. After three attempts, the notification remains failed and available for investigation.
+- desenvolvimento de APIs com Python e Flask;
+- PostgreSQL com SQLAlchemy 2.0;
+- histórico auditável dos eventos de rastreamento;
+- idempotência para eventos das transportadoras;
+- status das notificações, visibilidade de erros e tentativas limitadas;
+- paginação e filtros;
+- ambiente local com Docker;
+- testes automatizados e validação do Docker com GitHub Actions.
 
-## Author
+### Arquitetura
+
+```mermaid
+flowchart LR
+    A[Webhook da transportadora] --> B[API de rastreamento]
+    B --> C[(PostgreSQL)]
+    B --> D[Adaptador de notificações]
+    D --> E[E-mail / SMS / webhook]
+    D -->|falha| F[Erro + estado de tentativa]
+```
+
+O adaptador local valida destinatários e registra tentativas sem acessar um provedor real. Ele pode ser substituído pelo Amazon SES, SNS ou por um cliente HTTP. Na AWS, o fluxo pode evoluir para API Gateway ou ECS, SQS, worker de notificações, RDS/Aurora e uma fila de mensagens com falha.
+
+### Tecnologias
+
+- Python 3.11+
+- Flask e SQLAlchemy
+- PostgreSQL; SQLite para testes isolados e execução local sem configuração
+- Docker e Docker Compose
+- pytest e GitHub Actions
+
+### Executar com Docker
+
+```bash
+git clone https://github.com/Morgana-Fstack/shiptrack-api.git
+cd shiptrack-api
+docker compose up --build
+```
+
+A API será iniciada em `http://localhost:5000`.
+
+### Executar sem Docker
+
+```bash
+python -m venv .venv
+source .venv/bin/activate       # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python -m app.main
+```
+
+Sem a variável `DATABASE_URL`, a aplicação utiliza um banco SQLite local.
+
+### Endpoints principais
+
+```http
+GET  /health
+POST /shipments
+GET  /shipments?status=in_transit&page=1&per_page=20
+GET  /shipments/{shipment_id}
+POST /shipments/{shipment_id}/events
+GET  /shipments/{shipment_id}/notifications
+POST /notifications/{notification_id}/retry
+```
+
+As atualizações das transportadoras podem incluir um `external_event_id`. Caso o mesmo identificador seja recebido novamente, a API retorna o evento existente e evita mudanças ou notificações duplicadas. As notificações têm limite de três tentativas e as falhas permanecem disponíveis para investigação.
+
+### Testes
+
+```bash
+pytest -v
+```
+
+A suíte cobre criação, validação, filtros, histórico, idempotência, entrega bem-sucedida, falha do provedor e limite máximo de tentativas.
+
+## Author / Autora
 
 **Morgana Petterle da Cunha**  
-Full Stack Developer  
+Full Stack Developer / Desenvolvedora Full Stack  
 [LinkedIn](https://linkedin.com/in/morgana-petterle) · [GitHub](https://github.com/Morgana-Fstack)
