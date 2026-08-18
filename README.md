@@ -1,170 +1,161 @@
 # ShipTrack API 📦
 
-A lightweight REST API for shipment tracking and notifications, built with Python and SQLite.
+A production-minded REST API for shipment tracking and reliable customer notifications.
 
-Inspired by real-world logistics challenges — tracking high-volume shipment data across multiple carriers, keeping customers informed at every step.
+The project models a real logistics problem: carrier events arrive repeatedly and sometimes out of order, while customers expect every relevant update to be delivered and failures to remain visible.
 
----
+## What it demonstrates
 
-## Why this project?
+- Python and Flask API design
+- PostgreSQL with SQLAlchemy 2.0
+- Auditable shipment event history
+- Idempotent carrier events
+- Notification delivery states, errors and bounded retries
+- Pagination and filtering
+- Dockerized local environment
+- Automated tests and Docker builds with GitHub Actions
 
-Shipping platforms need to answer one question reliably: *"Where is my order?"*
+## Architecture
 
-This API models the core of that problem:
-- How do you structure shipment data so it's queryable and auditable?
-- How do you record tracking events without losing history?
-- How do you trigger notifications at the right moment?
-
-The schema reflects those decisions deliberately — separate tables for shipments, events, and notifications, so each concern has a clean boundary.
-
----
-
-## Tech Stack
-
-- **Python 3.11+**
-- **Flask** — lightweight HTTP layer
-- **SQLite** — relational database (swap for PostgreSQL in production)
-- **pytest** — full test coverage
-
----
-
-## Data Model
-
-```
-shipments
-  id (PK, UUID)
-  order_id
-  carrier
-  status         → pending | picked_up | in_transit | out_for_delivery | delivered | failed
-  origin
-  destination
-  created_at
-  updated_at
-
-tracking_events
-  id (PK, autoincrement)
-  shipment_id    → FK shipments.id
-  status
-  location
-  description
-  timestamp
-
-notifications
-  id (PK, autoincrement)
-  shipment_id    → FK shipments.id
-  event_id       → FK tracking_events.id
-  channel        → email | sms | webhook
-  recipient
-  sent_at
+```mermaid
+flowchart LR
+    A[Carrier webhook] --> B[Tracking API]
+    B --> C[(PostgreSQL)]
+    B --> D[Notification adapter]
+    D --> E[Email / SMS / webhook]
+    D -->|failure| F[Error + retry state]
 ```
 
-Each shipment update creates a tracking event, which in turn triggers a notification — keeping a full audit trail of what happened and when.
+The notification adapter is deterministic in local development: it validates recipients and records delivery attempts without contacting a real provider. Its boundary can be replaced by Amazon SES, SNS or an HTTP webhook client.
 
----
+For a distributed AWS deployment, the same flow can evolve to API Gateway/ECS, SQS, a notification worker, RDS/Aurora and a dead-letter queue. The current database-backed retry model keeps that failure lifecycle explicit while remaining easy to run locally.
 
-## Getting Started
+## Tech stack
+
+- Python 3.11+
+- Flask
+- SQLAlchemy
+- PostgreSQL (SQLite is used by isolated tests and as a zero-setup fallback)
+- Docker and Docker Compose
+- pytest
+- GitHub Actions
+
+## Run with Docker
 
 ```bash
-# 1. Clone the repo
 git clone https://github.com/Morgana-Fstack/shiptrack-api.git
 cd shiptrack-api
-
-# 2. Install dependencies
-pip install -r requirements.txt
-
-# 3. Run the API
-python app/main.py
+docker compose up --build
 ```
 
-The server starts at `http://localhost:5000`.
+The API starts at `http://localhost:5000`. Docker Compose also starts PostgreSQL and waits for its health check before starting the API.
 
----
+## Run without Docker
 
-## API Reference
+```bash
+python -m venv .venv
+source .venv/bin/activate       # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python -m app.main
+```
+
+Without `DATABASE_URL`, the application uses a local SQLite database. To use PostgreSQL, copy `.env.example` and provide a SQLAlchemy connection URL.
+
+## API reference
 
 ### Health check
-```
+
+```http
 GET /health
 ```
 
----
+### Create a shipment
 
-### Shipments
-
-**Create a shipment**
-```
+```http
 POST /shipments
 Content-Type: application/json
 
 {
-  "order_id": "ORD-2024-001",
+  "order_id": "ORD-2026-001",
   "carrier": "DHL",
   "origin": "Florence, IT",
   "destination": "Curitiba, BR"
 }
 ```
 
-**List all shipments**
-```
+### List and filter shipments
+
+```http
 GET /shipments
-GET /shipments?status=in_transit
+GET /shipments?status=in_transit&page=1&per_page=20
 ```
 
-**Get shipment + full tracking history**
-```
+`per_page` is capped at 100 to protect the service from unbounded list requests.
+
+### Get a shipment and its tracking history
+
+```http
 GET /shipments/{shipment_id}
 ```
 
----
+### Add a carrier event
 
-### Tracking Events
-
-**Push a new status update**
-```
+```http
 POST /shipments/{shipment_id}/events
 Content-Type: application/json
 
 {
+  "external_event_id": "DHL-EVENT-98421",
   "status": "in_transit",
   "location": "São Paulo, BR",
-  "description": "Package arrived at sorting facility.",
+  "description": "Package arrived at the sorting facility.",
+  "channel": "email",
   "notify": "customer@example.com"
 }
 ```
 
-Valid status values: `pending` → `picked_up` → `in_transit` → `out_for_delivery` → `delivered` | `failed`
+`external_event_id` makes repeated carrier deliveries idempotent. Sending it again returns the original event with `duplicate: true` instead of creating another event or notification.
 
----
+Valid shipment states are `pending`, `picked_up`, `in_transit`, `out_for_delivery`, `delivered` and `failed`.
 
-### Notifications
+### Inspect notification delivery
 
-**Get notification log for a shipment**
-```
+```http
 GET /shipments/{shipment_id}/notifications
 ```
 
----
+Each record exposes `status`, `attempts`, `last_error`, `created_at` and `sent_at`, so a delivery failure never disappears silently.
 
-## Running Tests
+### Retry a failed notification
 
-```bash
-pytest tests/ -v
+```http
+POST /notifications/{notification_id}/retry
 ```
 
----
+Delivery is limited to three attempts. Further retries return `409 Conflict`, preventing an infinite retry loop.
 
-## Design Decisions
+## Tests and CI
 
-**Why SQLite?** Zero setup for local development. The schema is fully compatible with PostgreSQL — swap the connection string and it runs in production.
+```bash
+pytest -v
+```
 
-**Why separate the `tracking_events` table?** Mutating the shipment status in place would lose history. A separate events table makes the full timeline queryable and auditable — which matters when customers dispute a delivery.
+The test suite covers shipment creation, validation, filtering, tracking history, idempotency, successful delivery, provider failure, visible error state and the maximum retry limit.
 
-**Why log notifications as a table?** So you can answer: *"Was the customer notified about this event?"* — critical for debugging and compliance.
+GitHub Actions runs the suite on Python 3.11 and 3.12 and verifies that the Docker image builds for every pull request.
 
----
+## Design decisions
+
+**Why preserve tracking events separately?** Updating only the latest shipment status would destroy history. An append-only event timeline makes disputes and operational debugging auditable.
+
+**Why idempotency?** Carrier webhooks can be delivered more than once. A unique external event per shipment prevents duplicate state changes and duplicate customer messages.
+
+**Why store notification failures?** A successful tracking update does not guarantee a successful customer message. Delivery status and errors are separate operational concerns.
+
+**Why bounded retries?** Transient failures deserve another attempt, but an unlimited loop amplifies outages. After three attempts, the notification remains failed and available for investigation.
 
 ## Author
 
 **Morgana Petterle da Cunha**  
 Full Stack Developer  
-[linkedin.com/in/morgana-petterle](https://linkedin.com/in/morgana-petterle) · [github.com/Morgana-Fstack](https://github.com/Morgana-Fstack)
+[LinkedIn](https://linkedin.com/in/morgana-petterle) · [GitHub](https://github.com/Morgana-Fstack)
