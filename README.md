@@ -83,6 +83,12 @@ pytest -v
 
 The suite covers creation, validation, filtering, tracking history, idempotency, successful delivery, provider failure and maximum retry limits.
 
+### Known limitations
+
+- authentication and API keys are not implemented in this portfolio version;
+- notification delivery is simulated by a local adapter and does not contact real email, SMS or webhook providers;
+- production deployment would require secrets management, rate limiting, observability and a queue-based worker.
+
 ---
 
 ## Português
@@ -165,6 +171,12 @@ pytest -v
 ```
 
 A suíte cobre criação, validação, filtros, histórico, idempotência, entrega bem-sucedida, falha do provedor e limite máximo de tentativas.
+
+### Limitações conhecidas
+
+- autenticação e chaves de API não estão implementadas nesta versão de portfólio;
+- o envio de notificações é simulado por um adaptador local e não acessa provedores reais de e-mail, SMS ou webhook;
+- um deploy de produção exigiria gestão de segredos, limitação de requisições, observabilidade e um worker baseado em filas.
 
 ## Author / Autora
 
