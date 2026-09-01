@@ -1,5 +1,11 @@
 # ShipTrack API 📦
 
+> **Autoria e direitos:** projeto criado por **Morgana Petterle da Cunha**.  
+> Copyright © 2026. Todos os direitos reservados. O código está disponível
+> somente para portfólio, demonstração e avaliação profissional. Consulte a
+> [licença proprietária](LICENSE).
+
+
 [English](#english) | [Português](#português)
 
 ## English
