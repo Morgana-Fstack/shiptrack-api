@@ -1,21 +1,23 @@
-MIT License
+PROPRIETARY LICENSE — ALL RIGHTS RESERVED
 
-Copyright (c) 2026 Morgana Petterle da Cunha
+Copyright © 2026 Morgana Petterle da Cunha. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This repository and its original source code, documentation, design, data models,
+business rules, and related materials (the "Work") were created by Morgana
+Petterle da Cunha and are made publicly visible solely for portfolio,
+demonstration, and professional evaluation purposes.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+No license or permission is granted to copy, reproduce, modify, adapt, publish,
+distribute, sublicense, sell, commercially exploit, or create derivative works
+from the Work, in whole or in substantial part, without the prior express
+written permission of Morgana Petterle da Cunha.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Viewing this repository or using GitHub's platform features does not grant any
+rights beyond those strictly required by GitHub's Terms of Service.
+
+Third-party libraries, frameworks, assets, and other dependencies remain subject
+to their respective licenses. This notice applies only to original material
+authored by Morgana Petterle da Cunha.
+
+For permission requests, contact the owner through:
+https://github.com/Morgana-Fstack
